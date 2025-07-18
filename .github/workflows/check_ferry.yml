@@ -1,0 +1,66 @@
+name: CalMac Ferry Availability Checker
+
+on:
+  schedule:
+    # Run every hour
+    - cron: "0 * * * *"
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  check-ferry-availability:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: |
+          playwright install chromium
+
+      - name: Create logs directory
+        run: mkdir -p logs
+
+      - name: Run ferry availability check
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python check_availability.py
+
+      - name: Upload logs as artifacts
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: ferry-check-logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 7
+
+      - name: Display recent log entries
+        if: always()
+        run: |
+          echo "=== Recent log entries ==="
+          if [ -f "logs/ferry_check_$(date +%Y%m%d).log" ]; then
+            tail -n 20 "logs/ferry_check_$(date +%Y%m%d).log"
+          else
+            echo "No log file found for today"
+            ls -la logs/ || echo "No logs directory"
+          fi
