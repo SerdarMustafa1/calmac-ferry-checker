@@ -1,6 +1,36 @@
 # CalMac Ferry Availability Checker
 
-An automated Python script that checks CalMac ferry availability hourly using GitHub Actions and sends Telegram notifications when your target route becomes available.
+An automated Python script that checks ## 🔧 Local Development
+
+To test locally:
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Install Playwright browsers
+playwright install chromium
+
+# Set environment variables
+export TELEGRAM_BOT_TOKEN="your_bot_token"
+export TELEGRAM_CHAT_ID="your_chat_id"
+
+# Run the main script
+python check_availability.py
+
+# Or run the test script (won't send actual Telegram messages)
+python test_local.py
+```
+
+## 🧪 Testing
+
+Use the included test script to debug the automation locally:
+
+```bash
+python test_local.py
+```
+
+This will run the full automation and save screenshots to the `logs/` directory without sending actual Telegram messages.ability hourly using GitHub Actions and sends Telegram notifications when your target route becomes available.
 
 ## 🎯 What it does
 
