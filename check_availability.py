@@ -155,45 +155,48 @@ async def check_ferry_availability():
                     logger.debug(f"Debug element listing failed: {e}")
                 logger.info("=== END DEBUG ===")
                 
-                # Look for the return journey option
+                # Look for the return journey option first
                 logger.info("Looking for return journey option...")
                 return_selectors = [
+                    'button:has-text("Return")',
+                    'div:has-text("Return") button',
+                    'label:has-text("Return")',
                     'input[type="radio"][value="return"]',
                     'input[name="journeyType"][value="return"]',
-                    'label:has-text("Return") input',
-                    'button:has-text("Return")',
-                    '.return-journey input',
-                    '.journey-type input[value="return"]'
+                    '.trip-type-btn:has-text("Return")',
+                    '.journey-type:has-text("Return")',
+                    '[data-test-automation*="return"]',
+                    'ion-button:has-text("Return")'
                 ]
                 
+                return_found = False
                 for selector in return_selectors:
                     try:
                         return_element = page.locator(selector)
                         if await return_element.count() > 0:
                             await return_element.first.click()
                             logger.info(f"Selected return journey using: {selector}")
+                            return_found = True
                             await page.wait_for_timeout(2000)
                             break
                     except Exception as e:
                         logger.debug(f"Failed to select return journey with {selector}: {e}")
                 
+                if not return_found:
+                    logger.warning("Could not find return journey option - may default to single journey")
+                
                 # Select departure port (Troon)
                 logger.info("Looking for departure port selection...")
                 await page.wait_for_timeout(2000)
                 
-                # Updated selectors for Angular/Ionic components
+                # Updated selectors based on live debug output - target the specific input fields
                 departure_selectors = [
-                    'edea-select[data-testid*="departure"]',
-                    'edea-select[data-testid*="from"]', 
-                    'ion-select[placeholder*="departure"]',
-                    'ion-select[placeholder*="from"]',
-                    'edea-select:has([placeholder*="From"])',
-                    'edea-select:has([placeholder*="Departure"])',
-                    'select[name*="departure"]',
-                    'select[name*="from"]',
-                    '#departurePort',
-                    '.departure select',
-                    '.from-port select'
+                    'input[placeholder="From"][data-test-automation*="portlist"]',
+                    'input[placeholder="From"]',
+                    'input[data-test-automation="desktop/step1/destinations/single.edea-select.undefined.input.portlist"]:first-of-type',
+                    'input[data-test-automation*="portlist"]:first-of-type',
+                    'edea-select:first-of-type input[placeholder="From"]',
+                    'edea-select:nth-of-type(1) input'
                 ]
                 
                 departure_selected = False
@@ -204,48 +207,63 @@ async def check_ferry_availability():
                         count = await elements.count()
                         
                         if count > 0:
-                            # For edea-select and ion-select components, try clicking first
                             element = elements.first
-                            if 'edea-select' in selector or 'ion-select' in selector:
-                                await element.click()
-                                await page.wait_for_timeout(1000)
-                                
-                                # Look for dropdown options
-                                option_selectors = [
-                                    'ion-item:has-text("Troon")',
-                                    'div[role="option"]:has-text("Troon")',
-                                    '.select-option:has-text("Troon")',
-                                    'button:has-text("Troon")'
-                                ]
-                                
-                                for option_selector in option_selectors:
-                                    try:
-                                        option_elements = page.locator(option_selector)
-                                        if await option_elements.count() > 0:
-                                            await option_elements.first.click()
-                                            logger.info(f"Selected Troon using: {selector} -> {option_selector}")
-                                            departure_selected = True
-                                            break
-                                    except Exception as e:
-                                        logger.debug(f"Failed to click Troon option with {option_selector}: {e}")
-                                
-                                if departure_selected:
-                                    break
-                            else:
-                                # Traditional select elements
+                            
+                            # For input fields within edea-select - these are the actual form fields
+                            await element.click()
+                            await page.wait_for_timeout(1000)
+                            
+                            # Clear any existing value and type "Troon"
+                            await element.clear()
+                            await element.fill('Troon')
+                            await page.wait_for_timeout(1500)
+                            
+                            # Look for dropdown options that appear
+                            option_selectors = [
+                                'div:has-text("Troon"):visible',
+                                'li:has-text("Troon"):visible', 
+                                'ion-item:has-text("Troon"):visible',
+                                '.edea-select-option-item:has-text("Troon")',
+                                '[role="option"]:has-text("Troon")',
+                                'button:has-text("Troon"):visible'
+                            ]
+                            
+                            option_found = False
+                            for option_selector in option_selectors:
                                 try:
-                                    await element.select_option(label='Troon')
-                                    logger.info(f"Selected Troon by label using: {selector}")
+                                    await page.wait_for_selector(option_selector, timeout=3000)
+                                    option_elements = page.locator(option_selector)
+                                    if await option_elements.count() > 0:
+                                        await option_elements.first.click()
+                                        logger.info(f"Selected Troon using: {selector} -> {option_selector}")
+                                        departure_selected = True
+                                        option_found = True
+                                        break
+                                except Exception as e:
+                                    logger.debug(f"Failed to click Troon option with {option_selector}: {e}")
+                            
+                            if option_found:
+                                break
+                                
+                            # If no dropdown appeared, try pressing Enter or Tab
+                            if not option_found:
+                                await element.press('Enter')
+                                await page.wait_for_timeout(1000)
+                                # Check if value was accepted
+                                value = await element.input_value()
+                                if value and 'troon' in value.lower():
+                                    logger.info(f"Selected Troon by typing and Enter using: {selector}")
                                     departure_selected = True
                                     break
-                                except:
-                                    try:
-                                        await element.select_option(value='troon')
-                                        logger.info(f"Selected Troon by value using: {selector}")
+                                else:
+                                    # Try Tab to move to next field (sometimes accepts the value)
+                                    await element.press('Tab')
+                                    await page.wait_for_timeout(1000)
+                                    value = await element.input_value()
+                                    if value and 'troon' in value.lower():
+                                        logger.info(f"Selected Troon by typing and Tab using: {selector}")
                                         departure_selected = True
                                         break
-                                    except:
-                                        continue
                                 
                     except Exception as e:
                         logger.debug(f"Failed with departure selector {selector}: {e}")
@@ -259,18 +277,14 @@ async def check_ferry_availability():
                 logger.info("Looking for arrival port selection...")
                 await page.wait_for_timeout(2000)
                 
+                # Updated selectors based on live debug output - target the specific input fields
                 arrival_selectors = [
-                    'edea-select[data-testid*="arrival"]',
-                    'edea-select[data-testid*="to"]',
-                    'ion-select[placeholder*="arrival"]', 
-                    'ion-select[placeholder*="to"]',
-                    'edea-select:has([placeholder*="To"])',
-                    'edea-select:has([placeholder*="Arrival"])',
-                    'select[name*="arrival"]',
-                    'select[name*="to"]',
-                    '#arrivalPort',
-                    '.arrival select',
-                    '.to-port select'
+                    'input[placeholder="To"][data-test-automation*="portlist"]',
+                    'input[placeholder="To"]',
+                    'input[data-test-automation="desktop/step1/destinations/single.edea-select.undefined.input.portlist"]:last-of-type',
+                    'input[data-test-automation*="portlist"]:last-of-type',
+                    'edea-select:last-of-type input[placeholder="To"]',
+                    'edea-select:nth-of-type(2) input'
                 ]
                 
                 arrival_selected = False
@@ -282,46 +296,62 @@ async def check_ferry_availability():
                         
                         if count > 0:
                             element = elements.first
-                            if 'edea-select' in selector or 'ion-select' in selector:
-                                await element.click()
-                                await page.wait_for_timeout(1000)
-                                
-                                # Look for dropdown options
-                                option_selectors = [
-                                    'ion-item:has-text("Brodick")',
-                                    'div[role="option"]:has-text("Brodick")',
-                                    '.select-option:has-text("Brodick")',
-                                    'button:has-text("Brodick")'
-                                ]
-                                
-                                for option_selector in option_selectors:
-                                    try:
-                                        option_elements = page.locator(option_selector)
-                                        if await option_elements.count() > 0:
-                                            await option_elements.first.click()
-                                            logger.info(f"Selected Brodick using: {selector} -> {option_selector}")
-                                            arrival_selected = True
-                                            break
-                                    except Exception as e:
-                                        logger.debug(f"Failed to click Brodick option with {option_selector}: {e}")
-                                
-                                if arrival_selected:
-                                    break
-                            else:
-                                # Traditional select elements
+                            
+                            # For input fields within edea-select - these are the actual form fields
+                            await element.click()
+                            await page.wait_for_timeout(1000)
+                            
+                            # Clear any existing value and type "Brodick"
+                            await element.clear()
+                            await element.fill('Brodick')
+                            await page.wait_for_timeout(1500)
+                            
+                            # Look for dropdown options that appear
+                            option_selectors = [
+                                'div:has-text("Brodick"):visible',
+                                'li:has-text("Brodick"):visible',
+                                'ion-item:has-text("Brodick"):visible',
+                                '.edea-select-option-item:has-text("Brodick")',
+                                '[role="option"]:has-text("Brodick")',
+                                'button:has-text("Brodick"):visible'
+                            ]
+                            
+                            option_found = False
+                            for option_selector in option_selectors:
                                 try:
-                                    await element.select_option(label='Brodick')
-                                    logger.info(f"Selected Brodick by label using: {selector}")
+                                    await page.wait_for_selector(option_selector, timeout=3000)
+                                    option_elements = page.locator(option_selector)
+                                    if await option_elements.count() > 0:
+                                        await option_elements.first.click()
+                                        logger.info(f"Selected Brodick using: {selector} -> {option_selector}")
+                                        arrival_selected = True
+                                        option_found = True
+                                        break
+                                except Exception as e:
+                                    logger.debug(f"Failed to click Brodick option with {option_selector}: {e}")
+                            
+                            if option_found:
+                                break
+                                
+                            # If no dropdown appeared, try pressing Enter or Tab
+                            if not option_found:
+                                await element.press('Enter')
+                                await page.wait_for_timeout(1000)
+                                # Check if value was accepted
+                                value = await element.input_value()
+                                if value and 'brodick' in value.lower():
+                                    logger.info(f"Selected Brodick by typing and Enter using: {selector}")
                                     arrival_selected = True
                                     break
-                                except:
-                                    try:
-                                        await element.select_option(value='brodick')
-                                        logger.info(f"Selected Brodick by value using: {selector}")
+                                else:
+                                    # Try Tab to move to next field (sometimes accepts the value)
+                                    await element.press('Tab')
+                                    await page.wait_for_timeout(1000)
+                                    value = await element.input_value()
+                                    if value and 'brodick' in value.lower():
+                                        logger.info(f"Selected Brodick by typing and Tab using: {selector}")
                                         arrival_selected = True
                                         break
-                                    except:
-                                        continue
                                 
                     except Exception as e:
                         logger.debug(f"Failed with arrival selector {selector}: {e}")
