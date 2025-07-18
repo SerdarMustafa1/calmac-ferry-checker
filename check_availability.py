@@ -71,7 +71,9 @@ async def check_ferry_availability():
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-gpu'
+                '--disable-gpu',
+                '--disable-web-security',
+                '--disable-features=VizDisplayCompositor'
             ]
         )
         context = await browser.new_context(
@@ -80,381 +82,619 @@ async def check_ferry_availability():
         )
         page = await context.new_page()
         
-        try:
-            # Navigate to CalMac booking page
-            logger.info("Navigating to CalMac booking page...")
-            await page.goto('https://ticketing.calmac.co.uk/B2C-Calmac/#/desktop/step1/destinations/single', 
-                          wait_until='domcontentloaded', timeout=45000)
-            
-            # Wait for page to load completely
-            await page.wait_for_timeout(5000)
-            
-            # Wait for the main form to be visible
-            await page.wait_for_selector('form, .booking-form, .search-form', timeout=15000)
-            
-            # Select journey type (Return should be default, but let's ensure it)
-            logger.info("Selecting return journey...")
+        # Add retry logic
+        max_retries = 2
+        for attempt in range(max_retries):
             try:
-                # Try multiple selectors for return journey
+                logger.info(f"Attempt {attempt + 1} of {max_retries}")
+                
+                # Navigate to CalMac welcoming page
+                logger.info("Navigating to CalMac welcoming page...")
+                await page.goto('https://ticketing.calmac.co.uk/B2C-Calmac/#/auth/welcoming', 
+                              wait_until='domcontentloaded', timeout=45000)
+                
+                # Wait for page to load completely and take initial screenshot
+                await page.wait_for_timeout(8000)
+                await page.screenshot(path=f'logs/initial_page_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
+                
+                # Log page info for debugging
+                logger.info(f"Page title: {await page.title()}")
+                logger.info(f"Current URL: {page.url}")
+                
+                # Wait for and look for the main booking interface
+                booking_selectors = [
+                    'button:has-text("Start booking")',
+                    'button:has-text("Book")',
+                    'a:has-text("Start")',
+                    '.start-booking',
+                    '.booking-button',
+                    'button[data-testid*="start"]',
+                    'button[data-testid*="book"]'
+                ]
+                
+                start_button_found = False
+                for selector in booking_selectors:
+                    try:
+                        await page.wait_for_selector(selector, timeout=5000)
+                        await page.click(selector)
+                        logger.info(f"Clicked start booking button using: {selector}")
+                        start_button_found = True
+                        await page.wait_for_timeout(3000)
+                        break
+                    except PlaywrightTimeoutError:
+                        continue
+                        
+                if not start_button_found:
+                    # Try to navigate directly to the booking form
+                    logger.info("No start button found, trying direct navigation to booking form...")
+                    await page.goto('https://ticketing.calmac.co.uk/B2C-Calmac/#/desktop/step1/destinations/single', 
+                                  wait_until='domcontentloaded', timeout=30000)
+                    await page.wait_for_timeout(5000)
+                
+                # Take screenshot after navigation
+                await page.screenshot(path=f'logs/booking_page_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
+                
+                # Look for the return journey option
+                logger.info("Looking for return journey option...")
                 return_selectors = [
                     'input[type="radio"][value="return"]',
                     'input[name="journeyType"][value="return"]',
+                    'label:has-text("Return") input',
+                    'button:has-text("Return")',
                     '.return-journey input',
-                    'label:has-text("Return") input'
+                    '.journey-type input[value="return"]'
                 ]
                 
                 for selector in return_selectors:
-                    return_radio = page.locator(selector)
-                    if await return_radio.count() > 0:
-                        await return_radio.first.click()
-                        await page.wait_for_timeout(1000)
-                        logger.info(f"Selected return journey using: {selector}")
-                        break
+                    try:
+                        return_element = page.locator(selector)
+                        if await return_element.count() > 0:
+                            await return_element.first.click()
+                            logger.info(f"Selected return journey using: {selector}")
+                            await page.wait_for_timeout(2000)
+                            break
+                    except Exception as e:
+                        logger.debug(f"Failed to select return journey with {selector}: {e}")
+                
+                # Select departure port (Troon)
+                logger.info("Looking for departure port selection...")
+                await page.wait_for_timeout(2000)
+                
+                departure_selectors = [
+                    'select[name*="departure"]',
+                    'select[name*="from"]',
+                    'select[data-testid*="departure"]',
+                    'select[data-testid*="from"]',
+                    '#departurePort',
+                    '.departure select',
+                    '.from-port select',
+                    'select:has(option:text("Troon"))'
+                ]
+                
+                departure_selected = False
+                for selector in departure_selectors:
+                    try:
+                        logger.info(f"Trying departure selector: {selector}")
+                        elements = page.locator(selector)
+                        count = await elements.count()
                         
-            except Exception as e:
-                logger.warning(f"Could not select return journey explicitly: {e}")
-            
-            # Select departure port (Troon)
-            logger.info("Selecting departure port: Troon...")
-            departure_selectors = [
-                'select[name="departurePort"]',
-                '#departurePort', 
-                '.departure-port select',
-                'select:has(option:text("Troon"))'
-            ]
-            
-            departure_selected = False
-            for selector in departure_selectors:
-                try:
-                    await page.wait_for_selector(selector, timeout=5000)
-                    departure_select = page.locator(selector).first
-                    await departure_select.select_option(label='Troon')
-                    await page.wait_for_timeout(1000)
-                    logger.info(f"Selected Troon using: {selector}")
-                    departure_selected = True
-                    break
-                except Exception as e:
-                    logger.debug(f"Failed to select departure with {selector}: {e}")
-                    
-            if not departure_selected:
-                raise Exception("Could not select departure port (Troon)")
-            
-            # Select arrival port (Brodick)
-            logger.info("Selecting arrival port: Brodick...")
-            arrival_selectors = [
-                'select[name="arrivalPort"]',
-                '#arrivalPort',
-                '.arrival-port select',
-                'select:has(option:text("Brodick"))'
-            ]
-            
-            arrival_selected = False
-            for selector in arrival_selectors:
-                try:
-                    await page.wait_for_selector(selector, timeout=5000)
-                    arrival_select = page.locator(selector).first
-                    await arrival_select.select_option(label='Brodick')
-                    await page.wait_for_timeout(1000)
-                    logger.info(f"Selected Brodick using: {selector}")
-                    arrival_selected = True
-                    break
-                except Exception as e:
-                    logger.debug(f"Failed to select arrival with {selector}: {e}")
-                    
-            if not arrival_selected:
-                raise Exception("Could not select arrival port (Brodick)")
-            
-            # Set outbound date (Sunday, 3 August 2025)
-            logger.info("Setting outbound date: 03/08/2025...")
-            date_selectors = [
-                'input[name="departureDate"]',
-                '#departureDate',
-                '.outbound-date input',
-                'input[type="date"]'
-            ]
-            
-            date_set = False
-            for selector in date_selectors:
-                try:
-                    outbound_date_input = page.locator(selector).first
-                    if await outbound_date_input.count() > 0:
-                        await outbound_date_input.clear()
-                        await outbound_date_input.fill('2025-08-03')  # Try ISO format first
-                        await page.wait_for_timeout(500)
-                        # If that doesn't work, try different formats
-                        current_value = await outbound_date_input.input_value()
-                        if not current_value or current_value == '':
-                            await outbound_date_input.fill('03/08/2025')
-                        await page.wait_for_timeout(1000)
-                        logger.info(f"Set outbound date using: {selector}")
-                        date_set = True
-                        break
-                except Exception as e:
-                    logger.debug(f"Failed to set outbound date with {selector}: {e}")
-                    
-            if not date_set:
-                logger.warning("Could not set outbound date")
-            
-            # Set return date (Tuesday, 5 August 2025)
-            logger.info("Setting return date: 05/08/2025...")
-            return_date_selectors = [
-                'input[name="returnDate"]',
-                '#returnDate',
-                '.return-date input',
-                'input[type="date"]:nth-of-type(2)'
-            ]
-            
-            return_date_set = False
-            for selector in return_date_selectors:
-                try:
-                    return_date_input = page.locator(selector).first
-                    if await return_date_input.count() > 0:
-                        await return_date_input.clear()
-                        await return_date_input.fill('2025-08-05')  # Try ISO format first
-                        await page.wait_for_timeout(500)
-                        # If that doesn't work, try different formats
-                        current_value = await return_date_input.input_value()
-                        if not current_value or current_value == '':
-                            await return_date_input.fill('05/08/2025')
-                        await page.wait_for_timeout(1000)
-                        logger.info(f"Set return date using: {selector}")
-                        return_date_set = True
-                        break
-                except Exception as e:
-                    logger.debug(f"Failed to set return date with {selector}: {e}")
-                    
-            if not return_date_set:
-                logger.warning("Could not set return date")
-            
-            # Set passengers
-            logger.info("Setting passenger details...")
-            
-            # Adults (1)
-            adult_selectors = ['input[name="adults"]', '#adults', '.adults-count input', 'input[placeholder*="Adult"]']
-            for selector in adult_selectors:
-                try:
-                    adult_input = page.locator(selector).first
-                    if await adult_input.count() > 0:
-                        await adult_input.clear()
-                        await adult_input.fill('1')
-                        logger.info(f"Set adults using: {selector}")
-                        break
-                except Exception as e:
-                    logger.debug(f"Failed to set adults with {selector}: {e}")
-            
-            # Children (1)
-            child_selectors = ['input[name="children"]', '#children', '.children-count input', 'input[placeholder*="Child"]']
-            for selector in child_selectors:
-                try:
-                    child_input = page.locator(selector).first
-                    if await child_input.count() > 0:
-                        await child_input.clear()
-                        await child_input.fill('1')
-                        logger.info(f"Set children using: {selector}")
-                        break
-                except Exception as e:
-                    logger.debug(f"Failed to set children with {selector}: {e}")
-            
-            # Infants (1)
-            infant_selectors = ['input[name="infants"]', '#infants', '.infants-count input', 'input[placeholder*="Infant"]']
-            for selector in infant_selectors:
-                try:
-                    infant_input = page.locator(selector).first
-                    if await infant_input.count() > 0:
-                        await infant_input.clear()
-                        await infant_input.fill('1')
-                        logger.info(f"Set infants using: {selector}")
-                        break
-                except Exception as e:
-                    logger.debug(f"Failed to set infants with {selector}: {e}")
-            
-            await page.wait_for_timeout(1000)
-            
-            # Add vehicle (Tesla Model Y / Car)
-            logger.info("Adding vehicle: Car...")
-            try:
-                # Look for vehicle section or "Add Vehicle" button
-                add_vehicle_btn = page.locator('button:has-text("Add Vehicle"), .add-vehicle, #addVehicle').first
-                if await add_vehicle_btn.count() > 0:
-                    await add_vehicle_btn.click()
-                    await page.wait_for_timeout(1000)
+                        if count > 0:
+                            # Try different ways to select Troon
+                            for element in await elements.all():
+                                try:
+                                    await element.select_option(label='Troon')
+                                    logger.info(f"Selected Troon by label using: {selector}")
+                                    departure_selected = True
+                                    break
+                                except:
+                                    try:
+                                        await element.select_option(value='troon')
+                                        logger.info(f"Selected Troon by value using: {selector}")
+                                        departure_selected = True
+                                        break
+                                    except:
+                                        try:
+                                            # Try case variations
+                                            await element.select_option(value='TROON')
+                                            logger.info(f"Selected TROON by value using: {selector}")
+                                            departure_selected = True
+                                            break
+                                        except:
+                                            continue
+                            
+                            if departure_selected:
+                                await page.wait_for_timeout(2000)
+                                break
+                                
+                    except Exception as e:
+                        logger.debug(f"Failed with departure selector {selector}: {e}")
+                
+                if not departure_selected:
+                    logger.warning("Could not select departure port (Troon)")
+                
+                # Select arrival port (Brodick)
+                logger.info("Looking for arrival port selection...")
+                await page.wait_for_timeout(2000)
+                
+                arrival_selectors = [
+                    'select[name*="arrival"]',
+                    'select[name*="to"]',
+                    'select[data-testid*="arrival"]',
+                    'select[data-testid*="to"]',
+                    '#arrivalPort',
+                    '.arrival select',
+                    '.to-port select',
+                    'select:has(option:text("Brodick"))'
+                ]
+                
+                arrival_selected = False
+                for selector in arrival_selectors:
+                    try:
+                        logger.info(f"Trying arrival selector: {selector}")
+                        elements = page.locator(selector)
+                        count = await elements.count()
+                        
+                        if count > 0:
+                            for element in await elements.all():
+                                try:
+                                    await element.select_option(label='Brodick')
+                                    logger.info(f"Selected Brodick by label using: {selector}")
+                                    arrival_selected = True
+                                    break
+                                except:
+                                    try:
+                                        await element.select_option(value='brodick')
+                                        logger.info(f"Selected Brodick by value using: {selector}")
+                                        arrival_selected = True
+                                        break
+                                    except:
+                                        try:
+                                            await element.select_option(value='BRODICK')
+                                            logger.info(f"Selected BRODICK by value using: {selector}")
+                                            arrival_selected = True
+                                            break
+                                        except:
+                                            continue
+                            
+                            if arrival_selected:
+                                await page.wait_for_timeout(2000)
+                                break
+                                
+                    except Exception as e:
+                        logger.debug(f"Failed with arrival selector {selector}: {e}")
+                
+                if not arrival_selected:
+                    logger.warning("Could not select arrival port (Brodick)")
+                
+                # Set outbound date (Sunday, 3 August 2025)
+                logger.info("Setting outbound date: 03/08/2025...")
+                await page.wait_for_timeout(2000)
+                
+                outbound_date_selectors = [
+                    'input[name*="departure"][type="date"]',
+                    'input[name*="outbound"][type="date"]',
+                    'input[data-testid*="departure"]',
+                    'input[data-testid*="outbound"]',
+                    '#departureDate',
+                    '.departure-date input',
+                    '.outbound-date input',
+                    'input[type="date"]:first-of-type'
+                ]
+                
+                outbound_date_set = False
+                for selector in outbound_date_selectors:
+                    try:
+                        elements = page.locator(selector)
+                        if await elements.count() > 0:
+                            element = elements.first
+                            # Clear and set the date in different formats
+                            await element.clear()
+                            await element.fill('2025-08-03')  # ISO format
+                            await page.wait_for_timeout(1000)
+                            
+                            # Verify it was set
+                            value = await element.input_value()
+                            if value and ('2025-08-03' in value or '03/08/2025' in value):
+                                logger.info(f"Set outbound date using: {selector}")
+                                outbound_date_set = True
+                                break
+                            else:
+                                # Try different format
+                                await element.clear()
+                                await element.fill('03/08/2025')
+                                await page.wait_for_timeout(1000)
+                                value = await element.input_value()
+                                if value:
+                                    logger.info(f"Set outbound date (DD/MM/YYYY) using: {selector}")
+                                    outbound_date_set = True
+                                    break
+                                    
+                    except Exception as e:
+                        logger.debug(f"Failed to set outbound date with {selector}: {e}")
+                
+                if not outbound_date_set:
+                    logger.warning("Could not set outbound date")
+                
+                # Set return date (Tuesday, 5 August 2025)
+                logger.info("Setting return date: 05/08/2025...")
+                await page.wait_for_timeout(2000)
+                
+                return_date_selectors = [
+                    'input[name*="return"][type="date"]',
+                    'input[name*="arrival"][type="date"]',
+                    'input[data-testid*="return"]',
+                    'input[data-testid*="arrival"]',
+                    '#returnDate',
+                    '.return-date input',
+                    '.arrival-date input',
+                    'input[type="date"]:nth-of-type(2)',
+                    'input[type="date"]:last-of-type'
+                ]
+                
+                return_date_set = False
+                for selector in return_date_selectors:
+                    try:
+                        elements = page.locator(selector)
+                        if await elements.count() > 0:
+                            element = elements.first
+                            await element.clear()
+                            await element.fill('2025-08-05')  # ISO format
+                            await page.wait_for_timeout(1000)
+                            
+                            # Verify it was set
+                            value = await element.input_value()
+                            if value and ('2025-08-05' in value or '05/08/2025' in value):
+                                logger.info(f"Set return date using: {selector}")
+                                return_date_set = True
+                                break
+                            else:
+                                # Try different format
+                                await element.clear()
+                                await element.fill('05/08/2025')
+                                await page.wait_for_timeout(1000)
+                                value = await element.input_value()
+                                if value:
+                                    logger.info(f"Set return date (DD/MM/YYYY) using: {selector}")
+                                    return_date_set = True
+                                    break
+                                    
+                    except Exception as e:
+                        logger.debug(f"Failed to set return date with {selector}: {e}")
+                
+                if not return_date_set:
+                    logger.warning("Could not set return date")
+                
+                # Set passengers
+                logger.info("Setting passenger details...")
+                await page.wait_for_timeout(2000)
+                
+                # Adults (1)
+                adult_selectors = [
+                    'input[name*="adult"]',
+                    'input[data-testid*="adult"]',
+                    'select[name*="adult"]',
+                    '#adults',
+                    '.adults input',
+                    '.passenger input:first-of-type'
+                ]
+                
+                for selector in adult_selectors:
+                    try:
+                        elements = page.locator(selector)
+                        if await elements.count() > 0:
+                            element = elements.first
+                            if await element.get_attribute('type') == 'number' or 'input' in selector:
+                                await element.clear()
+                                await element.fill('1')
+                            else:  # select element
+                                await element.select_option('1')
+                            logger.info(f"Set adults to 1 using: {selector}")
+                            break
+                    except Exception as e:
+                        logger.debug(f"Failed to set adults with {selector}: {e}")
+                
+                # Children (1)
+                child_selectors = [
+                    'input[name*="child"]',
+                    'input[data-testid*="child"]',
+                    'select[name*="child"]',
+                    '#children',
+                    '.children input'
+                ]
+                
+                for selector in child_selectors:
+                    try:
+                        elements = page.locator(selector)
+                        if await elements.count() > 0:
+                            element = elements.first
+                            if await element.get_attribute('type') == 'number' or 'input' in selector:
+                                await element.clear()
+                                await element.fill('1')
+                            else:
+                                await element.select_option('1')
+                            logger.info(f"Set children to 1 using: {selector}")
+                            break
+                    except Exception as e:
+                        logger.debug(f"Failed to set children with {selector}: {e}")
+                
+                # Infants (1)
+                infant_selectors = [
+                    'input[name*="infant"]',
+                    'input[data-testid*="infant"]',
+                    'select[name*="infant"]',
+                    '#infants',
+                    '.infants input'
+                ]
+                
+                for selector in infant_selectors:
+                    try:
+                        elements = page.locator(selector)
+                        if await elements.count() > 0:
+                            element = elements.first
+                            if await element.get_attribute('type') == 'number' or 'input' in selector:
+                                await element.clear()
+                                await element.fill('1')
+                            else:
+                                await element.select_option('1')
+                            logger.info(f"Set infants to 1 using: {selector}")
+                            break
+                    except Exception as e:
+                        logger.debug(f"Failed to set infants with {selector}: {e}")
+                
+                # Add vehicle (Car)
+                logger.info("Adding vehicle: Car...")
+                await page.wait_for_timeout(2000)
+                
+                # Look for add vehicle button first
+                add_vehicle_selectors = [
+                    'button:has-text("Add vehicle")',
+                    'button:has-text("Add car")',
+                    'button[data-testid*="vehicle"]',
+                    '.add-vehicle',
+                    '.vehicle-add'
+                ]
+                
+                vehicle_section_opened = False
+                for selector in add_vehicle_selectors:
+                    try:
+                        elements = page.locator(selector)
+                        if await elements.count() > 0:
+                            await elements.first.click()
+                            logger.info(f"Clicked add vehicle button using: {selector}")
+                            vehicle_section_opened = True
+                            await page.wait_for_timeout(2000)
+                            break
+                    except Exception as e:
+                        logger.debug(f"Failed to click add vehicle with {selector}: {e}")
                 
                 # Select car type
-                vehicle_select = page.locator('select[name="vehicleType"], #vehicleType, .vehicle-type').first
-                await vehicle_select.select_option(label='Car')
-                await page.wait_for_timeout(1000)
+                car_selectors = [
+                    'select[name*="vehicle"]',
+                    'select[data-testid*="vehicle"]',
+                    '#vehicleType',
+                    '.vehicle-type select',
+                    'select:has(option:text("Car"))'
+                ]
                 
-                # If there are vehicle size options, select appropriate one for Tesla Model Y
-                vehicle_size = page.locator('select[name="vehicleSize"], #vehicleSize, .vehicle-size')
-                if await vehicle_size.count() > 0:
-                    # Try to select medium/large car option
+                for selector in car_selectors:
                     try:
-                        await vehicle_size.select_option(label='Medium Car')
-                    except:
-                        try:
-                            await vehicle_size.select_option(label='Large Car')
-                        except:
-                            logger.warning("Could not select specific vehicle size, using default")
+                        elements = page.locator(selector)
+                        if await elements.count() > 0:
+                            element = elements.first
+                            try:
+                                await element.select_option(label='Car')
+                                logger.info(f"Selected Car using: {selector}")
+                                break
+                            except:
+                                try:
+                                    await element.select_option(value='car')
+                                    logger.info(f"Selected car by value using: {selector}")
+                                    break
+                                except:
+                                    continue
+                    except Exception as e:
+                        logger.debug(f"Failed to select car with {selector}: {e}")
                 
-            except Exception as e:
-                logger.warning(f"Could not add vehicle details: {e}")
-            
-            # Submit the search
-            logger.info("Submitting ferry search...")
-            search_selectors = [
-                'button:has-text("Search")',
-                'input[type="submit"]',
-                '.search-button',
-                '#searchButton',
-                'button[type="submit"]',
-                '.btn-search'
-            ]
-            
-            search_submitted = False
-            for selector in search_selectors:
+                # Take screenshot before submitting
+                await page.screenshot(path=f'logs/before_search_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
+                
+                # Submit the search
+                logger.info("Submitting ferry search...")
+                await page.wait_for_timeout(2000)
+                
+                search_selectors = [
+                    'button:has-text("Search")',
+                    'button:has-text("Find")',
+                    'button[type="submit"]',
+                    'input[type="submit"]',
+                    'button[data-testid*="search"]',
+                    '.search-button',
+                    '.btn-search',
+                    '.submit-button'
+                ]
+                
+                search_submitted = False
+                for selector in search_selectors:
+                    try:
+                        elements = page.locator(selector)
+                        if await elements.count() > 0:
+                            await elements.first.click()
+                            logger.info(f"Clicked search using: {selector}")
+                            search_submitted = True
+                            break
+                    except Exception as e:
+                        logger.debug(f"Failed to click search with {selector}: {e}")
+                
+                if not search_submitted:
+                    logger.warning("Could not submit search form")
+                    # Try pressing Enter on the page
+                    await page.keyboard.press('Enter')
+                    logger.info("Tried pressing Enter to submit")
+                
+                # Wait for results page to load
+                logger.info("Waiting for search results...")
+                await page.wait_for_timeout(10000)
+                
+                # Wait for results or error messages
                 try:
-                    search_btn = page.locator(selector).first
-                    if await search_btn.count() > 0:
-                        await search_btn.click()
-                        logger.info(f"Clicked search using: {selector}")
-                        search_submitted = True
-                        break
-                except Exception as e:
-                    logger.debug(f"Failed to click search with {selector}: {e}")
+                    await page.wait_for_selector(
+                        '.results, .sailing-results, .availability, .no-availability, .error, .ferry-times, .timetable', 
+                        timeout=30000
+                    )
+                except PlaywrightTimeoutError:
+                    logger.warning("Results page did not load within timeout")
+                
+                # Take screenshot of results
+                await page.screenshot(path=f'logs/results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
+                
+                # Check for availability
+                logger.info("Checking ferry availability...")
+                
+                # Get page content for analysis
+                page_content = await page.content()
+                page_text = await page.inner_text('body')
+                
+                # Log page info
+                logger.info(f"Results page title: {await page.title()}")
+                logger.info(f"Results page URL: {page.url}")
+                
+                # Enhanced availability detection
+                availability_found = False
+                
+                # Look for specific availability indicators
+                availability_selectors = [
+                    'button:has-text("Select")',
+                    'button:has-text("Book")',
+                    'button:has-text("Continue")',
+                    'button:has-text("Choose")',
+                    '.available',
+                    '.booking-available',
+                    '.select-sailing',
+                    '.price',
+                    '.fare',
+                    '.sailing-time:has(.available)',
+                    '[data-available="true"]',
+                    '.timetable .available'
+                ]
+                
+                availability_count = 0
+                for selector in availability_selectors:
+                    try:
+                        elements = page.locator(selector)
+                        count = await elements.count()
+                        if count > 0:
+                            availability_count += count
+                            logger.info(f"Found {count} availability indicators using: {selector}")
+                    except Exception as e:
+                        logger.debug(f"Error checking availability selector {selector}: {e}")
+                
+                # Check for unavailability indicators
+                unavailable_selectors = [
+                    ':has-text("Not Available")',
+                    ':has-text("Sold Out")',
+                    ':has-text("Fully booked")',
+                    ':has-text("No sailings")',
+                    '.unavailable',
+                    '.sold-out',
+                    '.no-availability',
+                    '.fully-booked'
+                ]
+                
+                unavailable_count = 0
+                for selector in unavailable_selectors:
+                    try:
+                        elements = page.locator(selector)
+                        count = await elements.count()
+                        if count > 0:
+                            unavailable_count += count
+                            logger.info(f"Found {count} unavailability indicators using: {selector}")
+                    except Exception as e:
+                        logger.debug(f"Error checking unavailability selector {selector}: {e}")
+                
+                # Text-based availability check
+                availability_keywords = [
+                    'select sailing', 'book now', 'available', 'choose time',
+                    'price:', '£', 'fare', 'continue to booking'
+                ]
+                unavailable_keywords = [
+                    'not available', 'sold out', 'fully booked', 'no sailings',
+                    'no availability', 'service not operating'
+                ]
+                
+                page_text_lower = page_text.lower()
+                keyword_availability = 0
+                keyword_unavailability = 0
+                
+                for keyword in availability_keywords:
+                    if keyword in page_text_lower:
+                        keyword_availability += 1
+                        logger.info(f"Found availability keyword: '{keyword}'")
+                
+                for keyword in unavailable_keywords:
+                    if keyword in page_text_lower:
+                        keyword_unavailability += 1
+                        logger.info(f"Found unavailability keyword: '{keyword}'")
+                
+                # Decision logic - need strong positive indicators
+                if (availability_count >= 2 or keyword_availability >= 3) and unavailable_count == 0:
+                    availability_found = True
+                    logger.info("🎉 Strong indication of ferry availability found!")
+                elif availability_count > 0 and unavailable_count == 0 and keyword_availability > 0:
+                    availability_found = True
+                    logger.info("🎉 Ferry availability found!")
+                else:
+                    logger.info(f"❌ No clear availability found. Availability indicators: {availability_count}, Unavailable indicators: {unavailable_count}")
+                
+                # Save detailed results for debugging
+                with open(f'logs/results_content_{datetime.now().strftime("%Y%m%d_%H%M%S")}.html', 'w', encoding='utf-8') as f:
+                    f.write(page_content)
+                
+                # If availability found, send Telegram notification
+                if availability_found:
+                    logger.info("🎉 Ferry availability FOUND!")
                     
-            if not search_submitted:
-                raise Exception("Could not submit search form")
-            
-            # Wait for results page to load
-            logger.info("Waiting for search results...")
-            await page.wait_for_timeout(8000)
-            
-            # Wait for either results or error messages
-            try:
-                await page.wait_for_selector('.results, .ferry-results, .availability, .no-availability, .error-message', timeout=30000)
-            except PlaywrightTimeoutError:
-                logger.warning("Results page did not load within timeout")
-                # Take screenshot for debugging
-                await page.screenshot(path=f'logs/timeout_screenshot_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
-                
-            # Check for availability
-            logger.info("Checking ferry availability...")
-            
-            # Take a screenshot for debugging
-            await page.screenshot(path=f'logs/results_screenshot_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
-            
-            # Get page content for analysis
-            page_content = await page.content()
-            page_text = await page.inner_text('body')
-            
-            # Log some page content for debugging
-            logger.info(f"Page title: {await page.title()}")
-            logger.info(f"Current URL: {page.url}")
-            
-            # Look for availability indicators
-            availability_found = False
-            
-            # Enhanced selectors for availability
-            availability_selectors = [
-                '.available',
-                '.booking-available', 
-                'button:has-text("Book")',
-                'button:has-text("Select")',
-                'button:has-text("Continue")',
-                '.ferry-available',
-                '[data-available="true"]',
-                '.price',  # Often indicates available bookings
-                '.fare'    # Similar to price
-            ]
-            
-            for selector in availability_selectors:
-                try:
-                    available_elements = page.locator(selector)
-                    count = await available_elements.count()
-                    if count > 0:
-                        availability_found = True
-                        logger.info(f"Found {count} availability indicators using selector: {selector}")
-                        break
-                except Exception as e:
-                    logger.debug(f"Error checking selector {selector}: {e}")
-            
-            # Check for unavailability indicators
-            unavailable_selectors = [
-                ':has-text("Not Available")',
-                ':has-text("Sold Out")',
-                ':has-text("No availability")',
-                ':has-text("Fully booked")',
-                '.unavailable',
-                '.sold-out',
-                '.no-availability'
-            ]
-            
-            unavailable_found = False
-            for selector in unavailable_selectors:
-                try:
-                    unavailable_elements = page.locator(selector)
-                    count = await unavailable_elements.count()
-                    if count > 0:
-                        unavailable_found = True
-                        logger.info(f"Found {count} unavailability indicators using selector: {selector}")
-                        break
-                except Exception as e:
-                    logger.debug(f"Error checking unavailable selector {selector}: {e}")
-            
-            # Also check page text for keywords
-            availability_keywords = ['available', 'book now', 'select', 'continue', 'price', 'fare']
-            unavailable_keywords = ['not available', 'sold out', 'no availability', 'fully booked']
-            
-            page_text_lower = page_text.lower()
-            
-            for keyword in availability_keywords:
-                if keyword in page_text_lower:
-                    logger.info(f"Found availability keyword: {keyword}")
-                    if not unavailable_found:  # Only set if we haven't found unavailable indicators
-                        availability_found = True
-                    break
-                    
-            for keyword in unavailable_keywords:
-                if keyword in page_text_lower:
-                    logger.info(f"Found unavailability keyword: {keyword}")
-                    unavailable_found = True
-                    break
-            
-            # Decision logic
-            if availability_found and not unavailable_found:
-                logger.info("🎉 Ferry availability FOUND!")
-                
-                # Send Telegram notification
-                message = """🚢 CalMac Alert! Your ferry is now available:
+                    message = f"""🚢 CalMac Alert! Your ferry is now available:
 
 Outbound: Troon → Brodick on Sun 03 Aug @ 07:45  
 Return: Brodick → Troon on Tue 05 Aug @ 15:30  
+Passengers: 1 Adult, 1 Child, 1 Infant + Car
 
 Book now: https://ticketing.calmac.co.uk/B2C-Calmac/
 
-Checked at: {}""".format(datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC'))
+Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
+Availability indicators found: {availability_count}
+Keywords matched: {keyword_availability}"""
+                    
+                    send_telegram_message(message)
+                    return True
+                else:
+                    logger.info("❌ No ferry availability found at this time")
+                    return False
                 
-                send_telegram_message(message)
-                return True
-                
-            else:
-                logger.info("❌ No ferry availability found at this time")
-                return False
-                
-        except PlaywrightTimeoutError as e:
-            logger.error(f"Timeout error during automation: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Error during ferry availability check: {e}")
-            # Take a screenshot for debugging
-            try:
-                await page.screenshot(path=f'logs/error_screenshot_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
-                logger.info("Error screenshot saved")
-            except:
-                pass
-            return False
-        finally:
-            await browser.close()
+            except PlaywrightTimeoutError as e:
+                logger.error(f"Timeout error on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    logger.info("Retrying...")
+                    await page.wait_for_timeout(5000)
+                    continue
+                else:
+                    return False
+            except Exception as e:
+                logger.error(f"Error on attempt {attempt + 1}: {e}")
+                # Take screenshot on error
+                try:
+                    await page.screenshot(path=f'logs/error_attempt_{attempt + 1}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
+                except:
+                    pass
+                if attempt < max_retries - 1:
+                    logger.info("Retrying...")
+                    await page.wait_for_timeout(5000)
+                    continue
+                else:
+                    return False
+        
+        await browser.close()
+        return False
 
 async def main():
     """Main entry point"""
