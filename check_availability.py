@@ -39,8 +39,9 @@ def send_telegram_message(message):
     logger = logging.getLogger(__name__)
     
     if not bot_token or not chat_id:
-        logger.error("Telegram credentials not found in environment variables")
-        return False
+        logger.warning("Telegram credentials not found in environment variables (normal for local testing)")
+        logger.info(f"Would send Telegram message: {message}")
+        return True  # Return True for local testing
     
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
@@ -66,7 +67,7 @@ async def check_ferry_availability():
     async with async_playwright() as p:
         # Launch browser with additional options for stability
         browser = await p.chromium.launch(
-            headless=True,
+            headless=True,  # Back to headless for production
             args=[
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -134,6 +135,26 @@ async def check_ferry_availability():
                 # Take screenshot after navigation
                 await page.screenshot(path=f'logs/booking_page_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
                 
+                # Debug: Log all available form elements
+                logger.info("=== DEBUG: Available form elements ===")
+                try:
+                    all_inputs = await page.locator('input, select, edea-select, ion-select, button').all()
+                    logger.info(f"Found {len(all_inputs)} form elements")
+                    
+                    for i, element in enumerate(all_inputs[:10]):  # Log first 10 elements
+                        try:
+                            tag_name = await element.evaluate('el => el.tagName')
+                            attrs = await element.evaluate('el => Array.from(el.attributes).map(attr => `${attr.name}="${attr.value}"`).join(" ")')
+                            text_content = await element.text_content()
+                            if text_content:
+                                text_content = text_content.strip()[:50]  # First 50 chars
+                            logger.info(f"Element {i+1}: <{tag_name.lower()} {attrs}>{text_content or ''}</{tag_name.lower()}>")
+                        except:
+                            logger.info(f"Element {i+1}: Could not analyze")
+                except Exception as e:
+                    logger.debug(f"Debug element listing failed: {e}")
+                logger.info("=== END DEBUG ===")
+                
                 # Look for the return journey option
                 logger.info("Looking for return journey option...")
                 return_selectors = [
@@ -160,15 +181,19 @@ async def check_ferry_availability():
                 logger.info("Looking for departure port selection...")
                 await page.wait_for_timeout(2000)
                 
+                # Updated selectors for Angular/Ionic components
                 departure_selectors = [
+                    'edea-select[data-testid*="departure"]',
+                    'edea-select[data-testid*="from"]', 
+                    'ion-select[placeholder*="departure"]',
+                    'ion-select[placeholder*="from"]',
+                    'edea-select:has([placeholder*="From"])',
+                    'edea-select:has([placeholder*="Departure"])',
                     'select[name*="departure"]',
                     'select[name*="from"]',
-                    'select[data-testid*="departure"]',
-                    'select[data-testid*="from"]',
                     '#departurePort',
                     '.departure select',
-                    '.from-port select',
-                    'select:has(option:text("Troon"))'
+                    '.from-port select'
                 ]
                 
                 departure_selected = False
@@ -179,8 +204,35 @@ async def check_ferry_availability():
                         count = await elements.count()
                         
                         if count > 0:
-                            # Try different ways to select Troon
-                            for element in await elements.all():
+                            # For edea-select and ion-select components, try clicking first
+                            element = elements.first
+                            if 'edea-select' in selector or 'ion-select' in selector:
+                                await element.click()
+                                await page.wait_for_timeout(1000)
+                                
+                                # Look for dropdown options
+                                option_selectors = [
+                                    'ion-item:has-text("Troon")',
+                                    'div[role="option"]:has-text("Troon")',
+                                    '.select-option:has-text("Troon")',
+                                    'button:has-text("Troon")'
+                                ]
+                                
+                                for option_selector in option_selectors:
+                                    try:
+                                        option_elements = page.locator(option_selector)
+                                        if await option_elements.count() > 0:
+                                            await option_elements.first.click()
+                                            logger.info(f"Selected Troon using: {selector} -> {option_selector}")
+                                            departure_selected = True
+                                            break
+                                    except Exception as e:
+                                        logger.debug(f"Failed to click Troon option with {option_selector}: {e}")
+                                
+                                if departure_selected:
+                                    break
+                            else:
+                                # Traditional select elements
                                 try:
                                     await element.select_option(label='Troon')
                                     logger.info(f"Selected Troon by label using: {selector}")
@@ -193,23 +245,14 @@ async def check_ferry_availability():
                                         departure_selected = True
                                         break
                                     except:
-                                        try:
-                                            # Try case variations
-                                            await element.select_option(value='TROON')
-                                            logger.info(f"Selected TROON by value using: {selector}")
-                                            departure_selected = True
-                                            break
-                                        except:
-                                            continue
-                            
-                            if departure_selected:
-                                await page.wait_for_timeout(2000)
-                                break
+                                        continue
                                 
                     except Exception as e:
                         logger.debug(f"Failed with departure selector {selector}: {e}")
                 
-                if not departure_selected:
+                if departure_selected:
+                    await page.wait_for_timeout(2000)
+                else:
                     logger.warning("Could not select departure port (Troon)")
                 
                 # Select arrival port (Brodick)
@@ -217,14 +260,17 @@ async def check_ferry_availability():
                 await page.wait_for_timeout(2000)
                 
                 arrival_selectors = [
+                    'edea-select[data-testid*="arrival"]',
+                    'edea-select[data-testid*="to"]',
+                    'ion-select[placeholder*="arrival"]', 
+                    'ion-select[placeholder*="to"]',
+                    'edea-select:has([placeholder*="To"])',
+                    'edea-select:has([placeholder*="Arrival"])',
                     'select[name*="arrival"]',
                     'select[name*="to"]',
-                    'select[data-testid*="arrival"]',
-                    'select[data-testid*="to"]',
                     '#arrivalPort',
                     '.arrival select',
-                    '.to-port select',
-                    'select:has(option:text("Brodick"))'
+                    '.to-port select'
                 ]
                 
                 arrival_selected = False
@@ -235,7 +281,34 @@ async def check_ferry_availability():
                         count = await elements.count()
                         
                         if count > 0:
-                            for element in await elements.all():
+                            element = elements.first
+                            if 'edea-select' in selector or 'ion-select' in selector:
+                                await element.click()
+                                await page.wait_for_timeout(1000)
+                                
+                                # Look for dropdown options
+                                option_selectors = [
+                                    'ion-item:has-text("Brodick")',
+                                    'div[role="option"]:has-text("Brodick")',
+                                    '.select-option:has-text("Brodick")',
+                                    'button:has-text("Brodick")'
+                                ]
+                                
+                                for option_selector in option_selectors:
+                                    try:
+                                        option_elements = page.locator(option_selector)
+                                        if await option_elements.count() > 0:
+                                            await option_elements.first.click()
+                                            logger.info(f"Selected Brodick using: {selector} -> {option_selector}")
+                                            arrival_selected = True
+                                            break
+                                    except Exception as e:
+                                        logger.debug(f"Failed to click Brodick option with {option_selector}: {e}")
+                                
+                                if arrival_selected:
+                                    break
+                            else:
+                                # Traditional select elements
                                 try:
                                     await element.select_option(label='Brodick')
                                     logger.info(f"Selected Brodick by label using: {selector}")
@@ -248,22 +321,14 @@ async def check_ferry_availability():
                                         arrival_selected = True
                                         break
                                     except:
-                                        try:
-                                            await element.select_option(value='BRODICK')
-                                            logger.info(f"Selected BRODICK by value using: {selector}")
-                                            arrival_selected = True
-                                            break
-                                        except:
-                                            continue
-                            
-                            if arrival_selected:
-                                await page.wait_for_timeout(2000)
-                                break
+                                        continue
                                 
                     except Exception as e:
                         logger.debug(f"Failed with arrival selector {selector}: {e}")
                 
-                if not arrival_selected:
+                if arrival_selected:
+                    await page.wait_for_timeout(2000)
+                else:
                     logger.warning("Could not select arrival port (Brodick)")
                 
                 # Set outbound date (Sunday, 3 August 2025)
@@ -271,6 +336,10 @@ async def check_ferry_availability():
                 await page.wait_for_timeout(2000)
                 
                 outbound_date_selectors = [
+                    'ion-datetime[data-testid*="departure"]',
+                    'ion-datetime[data-testid*="outbound"]',
+                    'edea-datepicker[data-testid*="departure"]',
+                    'edea-datepicker[data-testid*="outbound"]',
                     'input[name*="departure"][type="date"]',
                     'input[name*="outbound"][type="date"]',
                     'input[data-testid*="departure"]',
@@ -287,27 +356,40 @@ async def check_ferry_availability():
                         elements = page.locator(selector)
                         if await elements.count() > 0:
                             element = elements.first
-                            # Clear and set the date in different formats
-                            await element.clear()
-                            await element.fill('2025-08-03')  # ISO format
-                            await page.wait_for_timeout(1000)
                             
-                            # Verify it was set
-                            value = await element.input_value()
-                            if value and ('2025-08-03' in value or '03/08/2025' in value):
-                                logger.info(f"Set outbound date using: {selector}")
+                            if 'ion-datetime' in selector or 'edea-datepicker' in selector:
+                                # For Ionic datetime components
+                                await element.click()
+                                await page.wait_for_timeout(1000)
+                                # Try to set the value attribute directly
+                                await element.evaluate('el => el.value = "2025-08-03"')
+                                await page.wait_for_timeout(500)
+                                await element.dispatch_event('change')
+                                logger.info(f"Set outbound date using Ionic component: {selector}")
                                 outbound_date_set = True
                                 break
                             else:
-                                # Try different format
+                                # Traditional input elements
                                 await element.clear()
-                                await element.fill('03/08/2025')
+                                await element.fill('2025-08-03')  # ISO format
                                 await page.wait_for_timeout(1000)
+                                
+                                # Verify it was set
                                 value = await element.input_value()
-                                if value:
-                                    logger.info(f"Set outbound date (DD/MM/YYYY) using: {selector}")
+                                if value and ('2025-08-03' in value or '03/08/2025' in value):
+                                    logger.info(f"Set outbound date using: {selector}")
                                     outbound_date_set = True
                                     break
+                                else:
+                                    # Try different format
+                                    await element.clear()
+                                    await element.fill('03/08/2025')
+                                    await page.wait_for_timeout(1000)
+                                    value = await element.input_value()
+                                    if value:
+                                        logger.info(f"Set outbound date (DD/MM/YYYY) using: {selector}")
+                                        outbound_date_set = True
+                                        break
                                     
                     except Exception as e:
                         logger.debug(f"Failed to set outbound date with {selector}: {e}")
@@ -669,6 +751,19 @@ Keywords matched: {keyword_availability}"""
                     return True
                 else:
                     logger.info("❌ No ferry availability found at this time")
+                    
+                    # Send notification for no availability as well
+                    no_availability_message = f"""ℹ️ CalMac Check Complete - No Availability
+
+Route: Troon → Brodick (03 Aug) / Brodick → Troon (05 Aug)
+Passengers: 1 Adult, 1 Child, 1 Infant + Car
+
+Status: No availability found at this time
+Will check again in 1 hour
+
+Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"""
+                    
+                    send_telegram_message(no_availability_message)
                     return False
                 
             except PlaywrightTimeoutError as e:
